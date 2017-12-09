@@ -16,8 +16,10 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+var gHandle *pcap.Handle
+
 func main() {
-	confFilePath := flag.String("config", "config.json", "config file json format")
+	confFilePath := flag.String("config", "conf.json", "config file json format")
 	flag.Parse()
 
 	jsonConf, err := config.NewConfig("json", *confFilePath)
@@ -26,7 +28,7 @@ func main() {
 		return
 	}
 
-	blackIpMap := make(map[net.Ip]struct{})
+	blackIPMap := make(map[string]struct{})
 
 	for _, ds := range jsonConf.Strings("domains") {
 		ips, err := net.LookupIP(ds)
@@ -35,7 +37,7 @@ func main() {
 			continue
 		}
 		for _, ip := range ips {
-			blackIpMap[ip] = struct{}{}
+			blackIPMap[ip.String()] = struct{}{}
 		}
 
 	}
@@ -43,7 +45,7 @@ func main() {
 	for _, ipStr := range jsonConf.Strings("ips") {
 		ip := net.ParseIP(ipStr)
 		if ip != nil {
-			blackIpMap[ip] = struct{}{}
+			blackIPMap[ip.String()] = struct{}{}
 		}
 	}
 
@@ -71,28 +73,28 @@ func main() {
 		return
 	}
 
-	handle, err := pcap.OpenLive(devName, 1024, false, 10*time.Second)
+	gHandle, err = pcap.OpenLive(devName, 1024, false, 10*time.Second)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
-	defer handle.Close()
+	defer gHandle.Close()
 
 	fmt.Println("listen device", devName)
 
-	err = handle.SetBPFFilter("tcp and port 80")
+	err = gHandle.SetBPFFilter("tcp and port 80")
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	ps := gopacket.NewPacketSource(handle, handle.LinkType())
+	ps := gopacket.NewPacketSource(gHandle, gHandle.LinkType())
 	for p := range ps.Packets() {
 		ipLayer := p.Layer(layers.LayerTypeIPv4)
 		if ipLayer != nil {
 			ip, _ := ipLayer.(*layers.IPv4)
-			if _, ok := blackIpMap[ip.DstIP]; ok {
-				Reset(p)
+			if _, ok := blackIPMap[ip.DstIP.String()]; ok {
+				reset(p, ip)
 			}
 
 		}
@@ -100,6 +102,41 @@ func main() {
 
 }
 
-func Reset(pack gopacket.Packet) {
+func reset(pack gopacket.Packet, ip *layers.IPv4) {
+	ethLayer := pack.Layer(layers.LayerTypeEthernet)
+	if ethLayer == nil {
+		fmt.Println("not ethernet")
+		return
+	}
+	eth, _ := ethLayer.(*layers.Ethernet)
 
+	tcpLayer := pack.Layer(layers.LayerTypeTCP)
+	if tcpLayer == nil {
+		fmt.Println("not tcp")
+		return
+	}
+	tcp, _ := tcpLayer.(*layers.TCP)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{}
+	gopacket.SerializeLayers(buf, opts,
+		&layers.Ethernet{
+			SrcMAC: eth.DstMAC,
+			DstMAC: eth.SrcMAC,
+		},
+		&layers.IPv4{
+			SrcIP: ip.DstIP,
+			DstIP: ip.SrcIP,
+		},
+		&layers.TCP{
+			SrcPort: tcp.DstPort,
+			DstPort: tcp.SrcPort,
+			Ack:     tcp.Seq - 1,
+			RST:     true,
+		},
+	)
+	err := gHandle.WritePacketData(buf.Bytes())
+	if err != nil {
+		fmt.Println(ip.DstIP.String(), err.Error())
+	}
 }
