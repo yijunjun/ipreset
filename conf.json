@@ -1,10 +1,11 @@
 {
     "domains":[
+        "f11.baidu.com",
         "pos.baidu.com","cpro.baidu.com", 
         "m.baidu.com","dj.1688.com",
         "img-ads.csdn.net",
         "c.l.qq.com",
         "ccc-x.jd.com"
     ],
-    "ip":[]
+    "ips":[]
 }
