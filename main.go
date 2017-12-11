@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -149,7 +148,22 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	gopacket.SerializeLayers(buf, opts,
+
+	tcpObj := &layers.TCP{
+		SrcPort: tcp.DstPort,
+		DstPort: tcp.SrcPort,
+		Ack:     tcp.Seq + tcpDataLen + 1,
+		Seq:     tcp.Ack,
+		RST:     true,
+		ACK:     true,
+		PSH:     true,
+		URG:     true,
+	}
+
+	// 非常重要,否则无法序列化成功,因为计算检验值需要ip4/6
+	tcpObj.SetNetworkLayerForChecksum(ip)
+
+	err := gopacket.SerializeLayers(buf, opts,
 		&layers.Ethernet{
 			SrcMAC:       eth.DstMAC,
 			DstMAC:       eth.SrcMAC,
@@ -163,24 +177,15 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 			DstIP:    ip.SrcIP,
 			Protocol: ip.Protocol,
 		},
-		&layers.TCP{
-			SrcPort: tcp.DstPort,
-			DstPort: tcp.SrcPort,
-			Ack:     tcp.Seq + tcpDataLen + 1,
-			Seq:     tcp.Ack,
-			RST:     true,
-			ACK:     true,
-			PSH:     true,
-			URG:     true,
-		},
+		tcpObj,
 	)
-
-	bbs := buf.Bytes()
-	fmt.Println(len(bbs), bbs)
-	err := gHandle.WritePacketData(bbs) //buf.Bytes())
 	if err != nil {
-		fmt.Println("error:", ip.DstIP.String(), err.Error())
+		fmt.Println("Serial:", err.Error())
+		return
 	}
 
-	fmt.Println(time.Now().Unix(), ip.DstIP.String(), ip.Length, ip.IHL*4, tcp.DataOffset&0x0F, tcpDataLen)
+	err = gHandle.WritePacketData(buf.Bytes())
+	if err != nil {
+		fmt.Println("write:", ip.DstIP.String(), err.Error())
+	}
 }
