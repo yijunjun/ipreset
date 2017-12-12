@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -69,6 +72,24 @@ func main() {
 			blackIPMap[ip.String()] = struct{}{}
 		}
 	}
+
+	watch, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	defer watch.Close()
+	go func() {
+		for e := range watch.Events {
+			if e.Op&fsnotify.Write == fsnotify.Write {
+				restart()
+				// 自已退出
+				os.Exit(0)
+			}
+		}
+	}()
+
+	watch.Add(*confFilePath)
 
 	// Find all devices
 	devices, err := pcap.FindAllDevs()
@@ -188,4 +209,8 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 	if err != nil {
 		fmt.Println("write:", ip.DstIP.String(), err.Error())
 	}
+}
+
+func restart() {
+	// os.Getwd()
 }
