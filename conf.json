@@ -1,14 +1,23 @@
 {
+    "log":"ipreset.log",
     "domains":[
-        "f11.baidu.com","m.baidu.com",
+        "f11.baidu.com",
+        "m.baidu.com",
+        "pos.baidu.com",
+        "cpro.baidu.com", 
+        "m.baidu.com",
+
+        "dj.1688.com",
         "edu.csdn.net",
-        "pos.baidu.com","cpro.baidu.com", 
-        "m.baidu.com","dj.1688.com",
         "img-ads.csdn.net",
         "c.l.qq.com",
+
         "union-click.jd.com",
         "ccc-x.jd.com",
+        
         "click.aliyun.com",
+        "health.huanqiu.com",
+        "r.fastapi.net",
         "googleadservices.com"
     ],
     "ips":[]

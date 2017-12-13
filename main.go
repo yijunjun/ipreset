@@ -9,8 +9,14 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -19,9 +25,20 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+// ConfJSONFile 默认配置文件
+const ConfJSONFile = "conf.json"
+
+var (
+	// GitHash 编译代码版本
+	GitHash string
+	// CompileTime 编译时间
+	CompileTime string
+)
+
 type config struct {
 	Domains []string
 	Ips     []string
+	Log     string
 }
 
 func loadConfig(filePath string) (*config, error) {
@@ -43,7 +60,7 @@ func loadConfig(filePath string) (*config, error) {
 var gHandle *pcap.Handle
 
 func main() {
-	confFilePath := flag.String("config", "conf.json", "config file json format")
+	confFilePath := flag.String("config", ConfJSONFile, "config file json format")
 	flag.Parse()
 
 	jsonConf, err := loadConfig(*confFilePath)
@@ -52,15 +69,30 @@ func main() {
 		return
 	}
 
+	logFile, err := os.OpenFile(jsonConf.Log, os.O_RDWR|os.O_CREATE, os.ModePerm)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	defer logFile.Close()
+
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetOutput(logFile)
+
+	logOut(GitHash, CompileTime)
+
 	blackIPMap := make(map[string]struct{})
 
 	for _, ds := range jsonConf.Domains {
-		ips, err := net.LookupIP(ds)
-		if err != nil {
-			fmt.Println(ds, err.Error())
+		rds := strings.TrimSpace(ds)
+		if rds == "" {
 			continue
 		}
-		fmt.Println(ds, ips)
+		ips, err := net.LookupIP(rds)
+		if err != nil {
+			logOut(err.Error())
+			continue
+		}
 		for _, ip := range ips {
 			blackIPMap[ip.String()] = struct{}{}
 		}
@@ -75,16 +107,20 @@ func main() {
 
 	watch, err := fsnotify.NewWatcher()
 	if err != nil {
-		fmt.Println(err.Error())
+		logOut(err.Error())
 		return
 	}
 	defer watch.Close()
 	go func() {
 		for e := range watch.Events {
 			if e.Op&fsnotify.Write == fsnotify.Write {
-				restart()
-				// 自已退出
-				os.Exit(0)
+				err := restart()
+				if err == nil {
+					// 自已退出
+					os.Exit(0)
+				}
+				logOut(err.Error())
+
 			}
 		}
 	}()
@@ -94,7 +130,7 @@ func main() {
 	// Find all devices
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
-		fmt.Println(err.Error())
+		logOut(err.Error())
 		return
 	}
 
@@ -111,22 +147,22 @@ func main() {
 	}
 
 	if devName == "" {
-		fmt.Println("can not found dev")
+		logOut("can not found dev")
 		return
 	}
 
 	gHandle, err = pcap.OpenLive(devName, 64, true, pcap.BlockForever)
 	if err != nil {
-		fmt.Println(err.Error())
+		logOut(err.Error())
 		return
 	}
 	defer gHandle.Close()
 
-	fmt.Println("listen device", devName)
+	logOut("listen device", devName)
 
 	err = gHandle.SetBPFFilter("tcp and (dst port 80 or dst port 443)")
 	if err != nil {
-		fmt.Println(err.Error())
+		logOut(err.Error())
 		return
 	}
 
@@ -146,14 +182,14 @@ func main() {
 func reset(pack gopacket.Packet, ip *layers.IPv4) {
 	ethLayer := pack.Layer(layers.LayerTypeEthernet)
 	if ethLayer == nil {
-		fmt.Println("not ethernet")
+		logOut("not ethernet")
 		return
 	}
 	eth, _ := ethLayer.(*layers.Ethernet)
 
 	tcpLayer := pack.Layer(layers.LayerTypeTCP)
 	if tcpLayer == nil {
-		fmt.Println("not tcp")
+		logOut("not tcp")
 		return
 	}
 	tcp, _ := tcpLayer.(*layers.TCP)
@@ -201,16 +237,64 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		tcpObj,
 	)
 	if err != nil {
-		fmt.Println("Serial:", err.Error())
+		logOut("Serial:", err.Error())
 		return
 	}
 
 	err = gHandle.WritePacketData(buf.Bytes())
 	if err != nil {
-		fmt.Println("write:", ip.DstIP.String(), err.Error())
+		logOut("write:", ip.DstIP.String(), err.Error())
 	}
 }
 
-func restart() {
-	// os.Getwd()
+func restart() error {
+	selfPath, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		return err
+	}
+
+	confPath := ConfJSONFile
+	if len(os.Args) >= 2 {
+		confPath, err = filepath.Abs(os.Args[1])
+		if err != nil {
+			return err
+		}
+	}
+
+	return exec.Command("sh", "-c",
+		fmt.Sprintf(
+			"sleep 3s && %v -c %v",
+			selfPath,
+			confPath,
+		),
+	).Start()
+}
+
+// 日志输出
+func logOut(strs ...string) {
+	log.Println(strings.Join(strs, ","))
+
+	// fmt.Println(append(
+	// 	[]string{sourcePos(2)},
+	// 	strs...,
+	// ))
+}
+
+// opts第一个参数是函数层级
+func sourcePos(opts ...int) string {
+	skip := 1
+	if len(opts) > 0 {
+		skip = opts[0]
+	}
+	pc, file, line, ok := runtime.Caller(skip)
+	if !ok {
+		return ""
+	}
+	fun := runtime.FuncForPC(pc)
+	return fmt.Sprintf(
+		"[%v %v:%v]",
+		path.Base(file),
+		fun.Name(),
+		line,
+	)
 }
