@@ -13,10 +13,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -39,6 +41,7 @@ type config struct {
 	Domains []string
 	Ips     []string
 	Log     string
+	Daemon  bool
 }
 
 func loadConfig(filePath string) (*config, error) {
@@ -69,7 +72,7 @@ func main() {
 		return
 	}
 
-	logFile, err := os.OpenFile(jsonConf.Log, os.O_RDWR|os.O_CREATE, os.ModePerm)
+	logFile, err := os.OpenFile(jsonConf.Log, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -105,6 +108,11 @@ func main() {
 		}
 	}
 
+	if jsonConf.Daemon {
+		restart(0)
+		os.Exit(0)
+	}
+
 	watch, err := fsnotify.NewWatcher()
 	if err != nil {
 		logOut(err.Error())
@@ -114,13 +122,12 @@ func main() {
 	go func() {
 		for e := range watch.Events {
 			if e.Op&fsnotify.Write == fsnotify.Write {
-				err := restart()
-				if err == nil {
-					// 自已退出
-					os.Exit(0)
+				if err := restart(3); err != nil {
+					logOut(err.Error())
+					continue
 				}
-				logOut(err.Error())
-
+				// 自已退出
+				os.Exit(0)
 			}
 		}
 	}()
@@ -166,17 +173,26 @@ func main() {
 		return
 	}
 
-	ps := gopacket.NewPacketSource(gHandle, gHandle.LinkType())
-	for p := range ps.Packets() {
-		ipLayer := p.Layer(layers.LayerTypeIPv4)
-		if ipLayer != nil {
-			ip, _ := ipLayer.(*layers.IPv4)
-			if _, ok := blackIPMap[ip.DstIP.String()]; ok {
-				reset(p, ip)
+	go func() {
+		ps := gopacket.NewPacketSource(gHandle, gHandle.LinkType())
+		for p := range ps.Packets() {
+			ipLayer := p.Layer(layers.LayerTypeIPv4)
+			if ipLayer != nil {
+				ip, _ := ipLayer.(*layers.IPv4)
+				if _, ok := blackIPMap[ip.DstIP.String()]; ok {
+					reset(p, ip)
+				}
 			}
 		}
-	}
+	}()
 
+	signalChan := make(chan os.Signal, 1)
+
+	signal.Notify(signalChan, os.Interrupt, os.Kill, syscall.SIGTERM)
+
+	s := <-signalChan
+
+	logOut("recvice signal:" + s.String())
 }
 
 func reset(pack gopacket.Packet, ip *layers.IPv4) {
@@ -247,7 +263,7 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 	}
 }
 
-func restart() error {
+func restart(seconds int) error {
 	selfPath, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		return err
@@ -263,7 +279,8 @@ func restart() error {
 
 	return exec.Command("sh", "-c",
 		fmt.Sprintf(
-			"sleep 3s && %v -c %v",
+			"sleep %vs && %v -c %v",
+			seconds,
 			selfPath,
 			confPath,
 		),

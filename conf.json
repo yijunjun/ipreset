@@ -1,4 +1,5 @@
 {
+    "daemon":true,
     "log":"ipreset.log",
     "domains":[
         "f11.baidu.com",
@@ -18,6 +19,8 @@
         "click.aliyun.com",
         "health.huanqiu.com",
         "r.fastapi.net",
+        
+        "static.googleadsserving.cn",
         "googleadservices.com"
     ],
     "ips":[]
