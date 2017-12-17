@@ -1,5 +1,9 @@
 {
-    "daemon":true,
+    // 是否调试
+    "debug":false,
+    /*
+    日志文件
+    */
     "log":"ipreset.log",
     "domains":[
         "f11.baidu.com",

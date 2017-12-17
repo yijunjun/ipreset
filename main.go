@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -41,8 +42,15 @@ type config struct {
 	Domains []string
 	Ips     []string
 	Log     string
-	Daemon  bool
+	Debug   bool
 }
+
+var gHandle *pcap.Handle
+var gJSONConf *config
+var gLineRegex = regexp.MustCompilePOSIX("//.*\n")
+
+// 正则标志s,表示.允许匹配换行符
+var gCRegex = regexp.MustCompile(`(?s)/\*.*\*/`)
 
 func loadConfig(filePath string) (*config, error) {
 	bs, err := ioutil.ReadFile(filePath)
@@ -52,7 +60,12 @@ func loadConfig(filePath string) (*config, error) {
 
 	c := &config{}
 
-	err = json.Unmarshal(bs, c)
+	// 去注释
+	err = json.Unmarshal(
+		gCRegex.ReplaceAll(
+			gLineRegex.ReplaceAll(bs, nil),
+			nil,
+		), c)
 	if err != nil {
 		return nil, err
 	}
@@ -60,19 +73,34 @@ func loadConfig(filePath string) (*config, error) {
 	return c, nil
 }
 
-var gHandle *pcap.Handle
-
 func main() {
-	confFilePath := flag.String("config", ConfJSONFile, "config file json format")
-	flag.Parse()
-
-	jsonConf, err := loadConfig(*confFilePath)
+	// 跳到程序所在目录,方便直接读取配置文件和产生日志
+	progDir := filepath.Dir((os.Args[0]))
+	err := os.Chdir(progDir)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	logFile, err := os.OpenFile(jsonConf.Log, os.O_RDWR|os.O_CREATE, 0644)
+	confFilePath := flag.String("config", ConfJSONFile, "config file json format")
+	ptrDaemon := flag.Bool("daemon", true, "run daemon")
+	flag.Parse()
+
+	if *ptrDaemon {
+		err = restart()
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+		return
+	}
+
+	gJSONConf, err = loadConfig(*confFilePath)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	logFile, err := os.OpenFile(gJSONConf.Log, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -82,11 +110,12 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetOutput(logFile)
 
-	logOut(GitHash, CompileTime)
+	logOut(GitHash, CompileTime, fmt.Sprintf("pid:%v", os.Getpid()))
+	logOut(fmt.Sprint(*ptrDaemon))
 
 	blackIPMap := make(map[string]struct{})
 
-	for _, ds := range jsonConf.Domains {
+	for _, ds := range gJSONConf.Domains {
 		rds := strings.TrimSpace(ds)
 		if rds == "" {
 			continue
@@ -101,16 +130,11 @@ func main() {
 		}
 	}
 
-	for _, ipStr := range jsonConf.Ips {
+	for _, ipStr := range gJSONConf.Ips {
 		ip := net.ParseIP(ipStr)
 		if ip != nil {
 			blackIPMap[ip.String()] = struct{}{}
 		}
-	}
-
-	if jsonConf.Daemon {
-		restart(0)
-		os.Exit(0)
 	}
 
 	watch, err := fsnotify.NewWatcher()
@@ -119,10 +143,11 @@ func main() {
 		return
 	}
 	defer watch.Close()
+
 	go func() {
 		for e := range watch.Events {
 			if e.Op&fsnotify.Write == fsnotify.Write {
-				if err := restart(3); err != nil {
+				if err := restart(); err != nil {
 					logOut(err.Error())
 					continue
 				}
@@ -261,9 +286,13 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 	if err != nil {
 		logOut("write:", ip.DstIP.String(), err.Error())
 	}
+
+	if gJSONConf.Debug {
+		logOut(ip.DstIP.String())
+	}
 }
 
-func restart(seconds int) error {
+func restart() error {
 	selfPath, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		return err
@@ -277,13 +306,8 @@ func restart(seconds int) error {
 		}
 	}
 
-	return exec.Command("sh", "-c",
-		fmt.Sprintf(
-			"sleep %vs && %v -c %v",
-			seconds,
-			selfPath,
-			confPath,
-		),
+	return exec.Command(selfPath,
+		"-config="+confPath, "-daemon=false",
 	).Start()
 }
 
