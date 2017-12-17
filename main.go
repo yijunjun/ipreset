@@ -86,7 +86,8 @@ func main() {
 	ptrDaemon := flag.Bool("daemon", true, "run daemon")
 	flag.Parse()
 
-	if *ptrDaemon {
+	// 1号父进程,则不用重启
+	if os.Getppid() != 1 && *ptrDaemon {
 		err = restart()
 		if err != nil {
 			fmt.Println(err.Error())
@@ -126,6 +127,7 @@ func main() {
 			continue
 		}
 		for _, ip := range ips {
+			logOut(ds, ip.String())
 			blackIPMap[ip.String()] = struct{}{}
 		}
 	}
@@ -183,7 +185,7 @@ func main() {
 		return
 	}
 
-	gHandle, err = pcap.OpenLive(devName, 64, true, pcap.BlockForever)
+	gHandle, err = pcap.OpenLive(devName, 0, true, pcap.BlockForever)
 	if err != nil {
 		logOut(err.Error())
 		return
@@ -234,7 +236,7 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		return
 	}
 	tcp, _ := tcpLayer.(*layers.TCP)
-	if !tcp.SYN {
+	if tcp.RST {
 		return
 	}
 
@@ -252,10 +254,11 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		DstPort: tcp.SrcPort,
 		Ack:     tcp.Seq + tcpDataLen + 1,
 		Seq:     tcp.Ack,
+		SYN:     tcp.SYN,
 		RST:     true,
 		ACK:     true,
-		PSH:     true,
 		URG:     true,
+		Window:  40000,
 	}
 
 	// 非常重要,否则无法序列化成功,因为计算检验值需要ip4/6
@@ -276,6 +279,44 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 			Protocol: ip.Protocol,
 		},
 		tcpObj,
+	)
+	if err != nil {
+		logOut("Serial:", err.Error())
+		return
+	}
+
+	err = gHandle.WritePacketData(buf.Bytes())
+	if err != nil {
+		logOut("write:", ip.DstIP.String(), err.Error())
+	}
+
+	rstObj := &layers.TCP{
+		SrcPort: tcp.SrcPort,
+		DstPort: tcp.DstPort,
+		Seq:     tcp.Seq,
+		Ack:     tcp.Ack,
+		RST:     true,
+		Window:  tcp.Window,
+	}
+
+	// 非常重要,否则无法序列化成功,因为计算检验值需要ip4/6
+	rstObj.SetNetworkLayerForChecksum(ip)
+
+	err = gopacket.SerializeLayers(buf, opts,
+		&layers.Ethernet{
+			SrcMAC:       eth.SrcMAC,
+			DstMAC:       eth.DstMAC,
+			EthernetType: eth.EthernetType,
+		},
+		&layers.IPv4{
+			Version:  4,
+			TTL:      255,
+			TOS:      ip.TOS,
+			SrcIP:    ip.SrcIP,
+			DstIP:    ip.DstIP,
+			Protocol: ip.Protocol,
+		},
+		rstObj,
 	)
 	if err != nil {
 		logOut("Serial:", err.Error())
