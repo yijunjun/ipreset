@@ -83,7 +83,7 @@ func main() {
 	}
 
 	confFilePath := flag.String("config", ConfJSONFile, "config file json format")
-	ptrDaemon := flag.Bool("daemon", true, "run daemon")
+	ptrDaemon := flag.Bool("daemon", false, "run daemon")
 	flag.Parse()
 
 	// 1号父进程,则不用重启
@@ -127,7 +127,6 @@ func main() {
 			continue
 		}
 		for _, ip := range ips {
-			logOut(ds, ip.String())
 			blackIPMap[ip.String()] = struct{}{}
 		}
 	}
@@ -194,7 +193,7 @@ func main() {
 
 	logOut("listen device", devName)
 
-	err = gHandle.SetBPFFilter("tcp and (dst port 80 or dst port 443)")
+	err = gHandle.SetBPFFilter("tcp and (port 80 or port 443)")
 	if err != nil {
 		logOut(err.Error())
 		return
@@ -207,6 +206,8 @@ func main() {
 			if ipLayer != nil {
 				ip, _ := ipLayer.(*layers.IPv4)
 				if _, ok := blackIPMap[ip.DstIP.String()]; ok {
+					reset(p, ip)
+				} else if _, ok := blackIPMap[ip.SrcIP.String()]; ok {
 					reset(p, ip)
 				}
 			}
@@ -236,7 +237,7 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		return
 	}
 	tcp, _ := tcpLayer.(*layers.TCP)
-	if tcp.RST {
+	if tcp.RST || tcp.FIN {
 		return
 	}
 
@@ -249,20 +250,18 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		ComputeChecksums: true,
 	}
 
-	tcpObj := &layers.TCP{
+	ackFinObj := &layers.TCP{
 		SrcPort: tcp.DstPort,
 		DstPort: tcp.SrcPort,
 		Ack:     tcp.Seq + tcpDataLen + 1,
 		Seq:     tcp.Ack,
-		SYN:     tcp.SYN,
-		RST:     true,
 		ACK:     true,
-		URG:     true,
-		Window:  40000,
+		FIN:     true,
+		Window:  tcp.Window,
 	}
 
 	// 非常重要,否则无法序列化成功,因为计算检验值需要ip4/6
-	tcpObj.SetNetworkLayerForChecksum(ip)
+	ackFinObj.SetNetworkLayerForChecksum(ip)
 
 	err := gopacket.SerializeLayers(buf, opts,
 		&layers.Ethernet{
@@ -278,7 +277,7 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 			DstIP:    ip.SrcIP,
 			Protocol: ip.Protocol,
 		},
-		tcpObj,
+		ackFinObj,
 	)
 	if err != nil {
 		logOut("Serial:", err.Error())
@@ -290,17 +289,17 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 		logOut("write:", ip.DstIP.String(), err.Error())
 	}
 
-	rstObj := &layers.TCP{
+	finObj := &layers.TCP{
 		SrcPort: tcp.SrcPort,
 		DstPort: tcp.DstPort,
 		Seq:     tcp.Seq,
 		Ack:     tcp.Ack,
-		RST:     true,
+		FIN:     true,
 		Window:  tcp.Window,
 	}
 
 	// 非常重要,否则无法序列化成功,因为计算检验值需要ip4/6
-	rstObj.SetNetworkLayerForChecksum(ip)
+	finObj.SetNetworkLayerForChecksum(ip)
 
 	err = gopacket.SerializeLayers(buf, opts,
 		&layers.Ethernet{
@@ -316,7 +315,7 @@ func reset(pack gopacket.Packet, ip *layers.IPv4) {
 			DstIP:    ip.DstIP,
 			Protocol: ip.Protocol,
 		},
-		rstObj,
+		finObj,
 	)
 	if err != nil {
 		logOut("Serial:", err.Error())
