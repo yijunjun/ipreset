@@ -83,7 +83,7 @@ func main() {
 	}
 
 	confFilePath := flag.String("config", ConfJSONFile, "config file json format")
-	ptrDaemon := flag.Bool("daemon", false, "run daemon")
+	ptrDaemon := flag.Bool("daemon", true, "run daemon")
 	flag.Parse()
 
 	// 1号父进程,则不用重启
